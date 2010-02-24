@@ -54,21 +54,25 @@ class HTTPClient
 
     # Creates new TimeoutScheduler.
     def initialize
-      @pool = {}
-      @next = nil
-      @thread = start_timer_thread
+      @pool								= {}
+      @next								= nil
+      @thread							= start_timer_thread
+      @condition_variable = ConditionVariable.new
+      @mutex              = Mutex.new # the ordering is: TimeoutScheduler.@mutex may be outer lock to all Period.@lock mutexes
     end
 
     # Registers new timeout period.
     def register(thread, sec, ex)
       period = Period.new(thread, Time.now + sec, ex || ::Timeout::Error)
-      @pool[period] = true
-      if @next.nil? or period.time < @next
-        begin
-          @thread.wakeup
-        rescue ThreadError
-          # Thread may be dead by fork.
-          @thread = start_timer_thread
+      @mutex.synchronize do
+        @pool[period] = true
+        if @next.nil? or period.time < @next
+          begin
+            @condition_variable.signal
+          rescue ThreadError # FIXME: maybe this happens not anymore
+            # Thread may be dead by fork.
+            @thread = start_timer_thread
+          end
         end
       end
       period
@@ -76,8 +80,10 @@ class HTTPClient
 
     # Cancels the given period.
     def cancel(period)
-      @pool.delete(period)
-      period.cancel
+      @mutex.synchronize do
+        @pool.delete(period)
+        period.cancel
+      end
     end
 
   private
@@ -85,27 +91,33 @@ class HTTPClient
     def start_timer_thread
       thread = Thread.new {
         while true
-          if @pool.empty?
-            @next = nil
-            sleep
-          else
-            min, = @pool.min { |a, b| a[0].time <=> b[0].time }
-            @next = min.time
-            sec = @next - Time.now
-            if sec > 0
-              sleep(sec)
+          should_sleep = 0
+          @mutex.synchronize do
+            if @pool.empty?
+              @next = nil
+              @condition_variable.wait(@mutex)
+            else
+              min, = @pool.min { |a, b| a[0].time <=> b[0].time }
+              @next = min.time
+              should_sleep = @next - Time.now
+            end
+            if should_sleep <= 0
+              now = Time.now
+              @pool.keys.each do |period|
+                if period.time < now
+                  period.raise('execution expired')
+                  cancel(period)
+                end
+              end
             end
           end
-          now = Time.now
-          @pool.keys.each do |period|
-            if period.time < now
-              period.raise('execution expired')
-              cancel(period)
-            end
+          
+          # sleep outside of the mutex
+          if should_sleep > 0
+            sleep(should_sleep)
           end
         end
       }
-      Thread.pass while thread.status != 'sleep'
       thread
     end
   end
