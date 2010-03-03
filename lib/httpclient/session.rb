@@ -169,7 +169,7 @@ class HTTPClient
 
     def open(uri, via_proxy = false)
       sess = nil
-      if cached = get_cached_session(uri)
+      if !Thread.current[:HTTPClient__use_fresh_connection] && cached = get_cached_session(uri)
         sess = cached
       else
         sess = Session.new(@client, Site.new(uri), @agent_name, @from)

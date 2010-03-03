@@ -842,12 +842,24 @@ private
     end
     raise BadResponseError.new("retry count exceeded", res)
   end
+  
+  def with_thread_local(key,value)
+    old_value = Thread.current[key] 
+    begin
+      Thread.current[key] = value
+      yield
+    ensure
+      Thread.current[key] = old_value
+    end
+  end
 
   def protect_keep_alive_disconnected
     begin
       yield
     rescue KeepAliveDisconnected
-      yield
+      with_thread_local :HTTPClient__use_fresh_connection, true do
+        yield
+      end
     end
   end
 
